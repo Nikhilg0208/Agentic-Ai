@@ -2,9 +2,10 @@ import json
 import os
 from pathlib import Path
 import urllib.parse
-import requests
 from dotenv import load_dotenv
 from openai import OpenAI
+from pydantic import BaseModel, Field
+import requests
 
 # Load API key from .env
 load_dotenv(Path(__file__).with_name(".env"))
@@ -13,6 +14,24 @@ load_dotenv(Path(__file__).with_name(".env"))
 client = OpenAI()
 
 
+# -------------------------------------------------------------
+# 1. Define the Pydantic Schema for Structured Output
+# -------------------------------------------------------------
+class WeatherReport(BaseModel):
+    city: str = Field(description="The name of the city")
+    temperature_c: float = Field(description="Current temperature in Celsius as a number, e.g. 24.5")
+    temperature_f: float = Field(description="Current temperature in Fahrenheit as a number, e.g. 76.1")
+    condition: str = Field(description="Current weather condition (e.g. Clear, Sunny, Rainy, Smoky Haze)")
+    humidity: str = Field(description="Humidity percentage (e.g. '60%')")
+    wind_speed: str = Field(description="Wind speed (e.g. '5 km/h')")
+    clothing_advice: list[str] = Field(description="List of specific clothing or accessory recommendations")
+    carry_umbrella: bool = Field(description="True if rain or snow is likely, False otherwise")
+    travel_tip: str = Field(description="Practical tip for outdoor activities or commuting today")
+
+
+# -------------------------------------------------------------
+# 2. Define the Weather Tool
+# -------------------------------------------------------------
 def get_weather(city: str) -> dict:
     """
     Fetch current weather data for a city using a free weather API.
@@ -59,32 +78,24 @@ tools = [
     }
 ]
 
-print("=" * 50)
-print("     Weather AI Assistant (with Live Tools)   ")
-print("=" * 50)
-print("Ask any weather question directly! (Follow-up questions supported)")
-print("Examples:")
-print("  - 'What is the weather in New York?'")
-print("  - 'Compare weather in Agra and London'")
-print("  - 'What should I wear there?'")
-print("Type 'exit' to stop.\n")
-
 SYSTEM_RULES = """
 You are WeatherAI, an intelligent and friendly Weather & Travel Advisor.
 
 ### OPERATIONAL RULES:
 1. SCOPE: You only answer questions related to weather, climate, travel conditions, and packing/clothing advice. If the user asks about unrelated topics (e.g. general coding, recipes, trivia, politics), politely decline and remind them to ask about weather.
 2. LIVE ACCURACY: Always use the `get_weather` tool when asked about current weather in any city. NEVER guess, assume, or fabricate live temperature numbers.
-3. DUAL UNITS: Always report temperatures in both Celsius and Fahrenheit (e.g., 22°C / 72°F).
-4. ERROR HANDLING: If the `get_weather` tool returns an error or fails to find a location, clearly state that live data is currently unavailable for that place and offer typical seasonal climate information instead.
-5. CONCISE & STRUCTURED: When reporting weather, provide a crisp response with:
-   - 🌡️ **Current Conditions**: Temperature, sky condition, humidity, and wind.
-   - 👕 **What to Wear**: Practical clothing or accessory recommendations (e.g., umbrella, sunglasses, jacket).
-   - 💡 **Activity/Travel Tip**: A quick practical tip for outdoor plans.
+3. STRUCTURED DATA: When returning weather details, you MUST strictly adhere to the WeatherReport schema with accurate numbers and booleans.
+4. ERROR HANDLING: If the `get_weather` tool returns an error or fails to find a location, clearly state that live data is currently unavailable for that place.
 """
 
-# [Improvement 1: Chat Memory]
-# Keep the conversation history list outside the loop so context is remembered!
+print("=" * 55)
+print("     Weather AI Assistant (with Pydantic & Tools)   ")
+print("=" * 55)
+print("Ask any weather question directly!")
+print("Example: 'What is the weather in Agra?'")
+print("Type 'exit' to stop.\n")
+
+# [Chat Memory: keep messages outside the loop]
 messages = [
     {
         "role": "system",
@@ -103,7 +114,6 @@ while True:
             print("Goodbye!")
             break
 
-        # Append the new user question to the ongoing history
         messages.append({"role": "user", "content": user_prompt})
 
         print("\nThinking...")
@@ -119,8 +129,6 @@ while True:
 
         # Step 2: Check if AI decided to call any tools
         if response_message.tool_calls:
-            # [Improvement 2: Multiple Tool Calls Fix]
-            # Append the assistant's tool-call request ONCE before the loop
             messages.append(response_message)
 
             for tool_call in response_message.tool_calls:
@@ -129,11 +137,9 @@ while True:
                     city_arg = args.get("city", "")
                     print(f"[Tool Calling] Fetching live weather for: {city_arg}...")
 
-                    # [Improvement 3: Handled spaces in city names]
                     weather_data = get_weather(city_arg)
                     print(f"[Tool Result] {weather_data}")
 
-                    # Provide tool result back to the conversation
                     messages.append(
                         {
                             "role": "tool",
@@ -142,31 +148,39 @@ while True:
                         }
                     )
 
-            # [Improvement 4: Streaming Output]
-            # Stream the final answer word-by-word like ChatGPT!
-            print("\nAI: ", end="", flush=True)
-            stream_response = client.chat.completions.create(
+            # Step 3: Parse response with Pydantic!
+            print("\nParsing response with Pydantic...")
+            parse_response = client.beta.chat.completions.parse(
                 model="gpt-4o-mini",
                 messages=messages,
-                stream=True,
+                response_format=WeatherReport,  # <-- Enforces WeatherReport Pydantic schema!
             )
 
-            full_reply = ""
-            for chunk in stream_response:
-                content = chunk.choices[0].delta.content or ""
-                print(content, end="", flush=True)
-                full_reply += content
-            print()
+            # Get the validated Pydantic object
+            report: WeatherReport = parse_response.choices[0].message.parsed
 
-            # Save the assistant's final response into conversation memory
-            messages.append({"role": "assistant", "content": full_reply})
+            # Display structured Pydantic data
+            print("\n" + "=" * 55)
+            print(f"📍 City         : {report.city}")
+            print(f"🌡️  Temperature  : {report.temperature_c}°C / {report.temperature_f}°F")
+            print(f"☁️  Condition    : {report.condition}")
+            print(f"💧 Humidity     : {report.humidity} | 💨 Wind: {report.wind_speed}")
+            print(f"☔ Carry Umbrella: {'YES (Rain/Snow likely)' if report.carry_umbrella else 'NO'}")
+            print("👕 What to Wear :")
+            for item in report.clothing_advice:
+                print(f"   • {item}")
+            print(f"💡 Travel Tip   : {report.travel_tip}")
+            print("=" * 55)
+
+            # Save the JSON representation in conversation history for memory
+            messages.append({"role": "assistant", "content": report.model_dump_json()})
 
         else:
-            # If no tools were called, print directly and store in memory
+            # If no tools were called (e.g. conversational question or off-topic decline)
             print(f"\nAI: {response_message.content}")
             messages.append(response_message)
 
-        print("-" * 50 + "\n")
+        print("-" * 55 + "\n")
 
     except KeyboardInterrupt:
         print("\nGoodbye!")
