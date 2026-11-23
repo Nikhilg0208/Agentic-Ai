@@ -13,4 +13,4 @@ def get_mongo_client() -> MongoClient:
 
 def get_qdrant_client() -> QdrantClient:
     """Returns a Qdrant client instance."""
-    return QdrantClient(url=settings.QDRANT_URL)
+    return QdrantClient(url=settings.QDRANT_URL, check_compatibility=False)
